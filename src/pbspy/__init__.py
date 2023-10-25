@@ -12,6 +12,7 @@ References:
 * https://github.com/dry-python/returns#better-async-composition
 """
 import asyncio
+import json
 from asyncio.subprocess import PIPE
 from asyncio_throttle import Throttler
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from returns.pointfree import bind
 from returns.result import Success
 
 
+DEFAULT_JOBNAME = 'pbspy'
+QSTAT_TEMPLATE = '''qstat -f -x -F json {jobid}'''
 # 10 jobs every 5 seconds
 SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
@@ -35,20 +38,39 @@ class JobSpec:
     """Specifies a PBS batch job."""
 
     cmd: str
-    name: str
-    ask_mem: str
-    ask_ncpus: int
-    ask_walltime: str
-    path_err: Optional[str] = None
-    path_out: Optional[str] = None
+    mem: str
+    ncpus: int
+    walltime: str
+    name: str = DEFAULT_JOBNAME
+    queue: Optional[str] = None
+    error_path: Optional[str] = None
+    output_path: Optional[str] = None
+
+    def __repr__(self) -> str:
+        """`qsub` command required to submit the job.
+
+        `cmd` is not included and is assumed to be passed via stdin.
+        """
+        return (f'qsub'
+                f' -l mem={self.mem}'
+                f' -l ncpus={self.ncpus}'
+                f' -l walltime={self.walltime}'
+                f' -N {self.name}'
+                f'{(" -q " + self.queue) if self.queue else ""}'
+                f'{(" -e " + self.error_path) if self.error_path else ""}'
+                f'{(" -o " + self.output_path) if self.output_path else ""}')
 
 
 @dataclass
 class Job:
     """Describes a submitted PBS job."""
 
-    job_id: int
-    err_path: str
+    jobid: int
+    error_path: str
+
+    def poll(self) -> str:
+        """command required to poll the job."""
+        return f'qstat -f -x -F json {self.jobid}'
 
 
 @future_safe
@@ -65,34 +87,38 @@ async def submit(jobspec: Optional[JobSpec | Dict[str, Any]] = None,
 
     async with SUBMISSION_LIMIT:
         proc = await asyncio.create_subprocess_shell(
-            f'''
-            qsub \\
-            -l mem={jobspec.ask_mem} \\
-            -l ncpus={jobspec.ask_ncpus} \\
-            -l walltime={jobspec.ask_walltime} \\
-            -N "{jobspec.name}"''',
+            repr(jobspec),
             stdin=PIPE,
             stdout=PIPE,
             stderr=PIPE,
         )
         stdout, stderr = await proc.communicate(
             input=jobspec.cmd.encode("utf-8"))
-        await asyncio.sleep(1)
         if proc.returncode != 0:
             raise Exception(f'{jobspec}: {stderr.decode("utf-8")}')
-        job_id = int(stdout.decode("utf-8").split(".")[0].strip())
-        print(job_id)
-        job_name = jobspec.name or "STDIN"
-        err_path = jobspec.path_err or f"{getcwd()}/{job_name}.e{job_id}"
-        return Job(job_id, err_path)
+        jobid = stdout.decode("utf-8").strip()
+        jobnum = int(jobid.split(".")[0])
+        error_path = jobspec.error_path or f"{getcwd()}/{jobspec.name}.e{jobnum}"
+        print(f'{jobid} submitted')
+        return Job(jobid, error_path)
 
 
 @future_safe
 async def wait_till_done(job: Job, waitsec=10) -> Job:
     """Wait until the job is finished."""
+    # filesystem checks are cheap, qstat is not
     while True:
-        if path.exists(job.err_path):
-            # TODO: single qstat call to check job exit status
+        if path.exists(job.error_path):
+            proc = await asyncio.create_subprocess_shell(
+                job.poll(),
+                stdout=PIPE,
+                stderr=PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            details = json.loads(stdout.decode('utf-8'))['Jobs'][job.jobid]
+            exit_status = details['Exit_status']
+            if exit_status != 0:
+                raise Exception(f'{job}: {details["comment"]}')
             return job
         await asyncio.sleep(waitsec)
 
@@ -104,24 +130,25 @@ def handle_results(results: Sequence[IOResult[Job, Exception]]) -> None:
             case IOFailure(ex):
                 print(ex, file=stderr)
             case IOSuccess(Success(job)):
-                print(f'{job.job_id} completed')
+                print(f'{job.jobid} succeeded')
 
 
 async def main():
     jobs = [
         JobSpec(
-            cmd="echo foo",
-            name="a-sitting-on-a-gate",
-            ask_mem="1MB",
-            ask_ncpus=1,
-            ask_walltime="00:01:00",
+            cmd='echo foo',
+            mem='1MB',
+            ncpus=1,
+            walltime='00:01:00',
+            name='a-sitting-on-a-gate',
+            queue='testing',
         ),
         JobSpec(
-            cmd="echo bar",
-            name="haddocks-eyes",
-            ask_mem="1MB",
-            ask_ncpus=1,
-            ask_walltime="00:01:00",
+            cmd='echo bar',
+            mem='1MB',
+            ncpus=1,
+            walltime='00:01:00',
+            name='haddocks-eyes',
         ),
     ]
 
