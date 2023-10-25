@@ -1,0 +1,2 @@
+returns>=0.22.0
+asyncio_throttle>=1.0.2

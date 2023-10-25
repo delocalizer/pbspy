@@ -13,6 +13,7 @@ References:
 """
 import asyncio
 from asyncio.subprocess import PIPE
+from asyncio_throttle import Throttler
 from dataclasses import dataclass
 from os import getcwd, path
 from sys import stderr
@@ -23,6 +24,10 @@ from returns.io import IOFailure, IOResult, IOSuccess
 from returns.pipeline import flow
 from returns.pointfree import bind
 from returns.result import Success
+
+
+# 10 jobs every 5 seconds
+SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
 
 @dataclass
@@ -47,7 +52,8 @@ class Job:
 
 
 @future_safe
-async def submit(jobspec: Optional[JobSpec | Dict[str, Any]] = None, **kwargs) -> Job:
+async def submit(jobspec: Optional[JobSpec | Dict[str, Any]] = None,
+                 **kwargs) -> Job:
     """Submit a job to the scheduler."""
     match jobspec:
         case JobSpec():
@@ -57,24 +63,28 @@ async def submit(jobspec: Optional[JobSpec | Dict[str, Any]] = None, **kwargs) -
         case _:
             jobspec = JobSpec(**kwargs)
 
-    proc = await asyncio.create_subprocess_shell(
-        f'''
-        qsub \\
-        -l mem={jobspec.ask_mem} \\
-        -l ncpus={jobspec.ask_ncpus} \\
-        -l walltime={jobspec.ask_walltime} \\
-        -N "{jobspec.name}"''',
-        stdin=PIPE,
-        stdout=PIPE,
-        stderr=PIPE,
-    )
-    stdout, stderr = await proc.communicate(input=jobspec.cmd.encode("utf-8"))
-    if proc.returncode != 0:
-        raise Exception(f'{jobspec}: {stderr.decode("utf-8")}')
-    job_id = int(stdout.decode("utf-8").split(".")[0].strip())
-    job_name = jobspec.name or "STDIN"
-    err_path = jobspec.path_err or f"{getcwd()}/{job_name}.e{job_id}"
-    return Job(job_id, err_path)
+    async with SUBMISSION_LIMIT:
+        proc = await asyncio.create_subprocess_shell(
+            f'''
+            qsub \\
+            -l mem={jobspec.ask_mem} \\
+            -l ncpus={jobspec.ask_ncpus} \\
+            -l walltime={jobspec.ask_walltime} \\
+            -N "{jobspec.name}"''',
+            stdin=PIPE,
+            stdout=PIPE,
+            stderr=PIPE,
+        )
+        stdout, stderr = await proc.communicate(
+            input=jobspec.cmd.encode("utf-8"))
+        await asyncio.sleep(1)
+        if proc.returncode != 0:
+            raise Exception(f'{jobspec}: {stderr.decode("utf-8")}')
+        job_id = int(stdout.decode("utf-8").split(".")[0].strip())
+        print(job_id)
+        job_name = jobspec.name or "STDIN"
+        err_path = jobspec.path_err or f"{getcwd()}/{job_name}.e{job_id}"
+        return Job(job_id, err_path)
 
 
 @future_safe
@@ -83,7 +93,7 @@ async def wait_till_done(job: Job, waitsec=10) -> Job:
     while True:
         if path.exists(job.err_path):
             # TODO: single qstat call to check job exit status
-            return job 
+            return job
         await asyncio.sleep(waitsec)
 
 
@@ -101,7 +111,7 @@ async def main():
     jobs = [
         JobSpec(
             cmd="echo foo",
-            name="a sitting-on-a-gate",
+            name="a-sitting-on-a-gate",
             ask_mem="1MB",
             ask_ncpus=1,
             ask_walltime="00:01:00",
@@ -115,7 +125,6 @@ async def main():
         ),
     ]
 
-    # TODO: Semaphore to throttle number of job submissions and checks
     flows = [flow(job, submit, bind(wait_till_done)) for job in jobs]
     handle_results(await asyncio.gather(*flows))
 
