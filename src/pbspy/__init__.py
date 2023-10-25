@@ -27,8 +27,6 @@ from returns.pointfree import bind
 from returns.result import Success
 
 
-DEFAULT_JOBNAME = 'pbspy'
-QSTAT_TEMPLATE = '''qstat -f -x -F json {jobid}'''
 # 10 jobs every 5 seconds
 SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
@@ -41,7 +39,7 @@ class JobSpec:
     mem: str
     ncpus: int
     walltime: str
-    name: str = DEFAULT_JOBNAME
+    name: str = 'pbspy'
     queue: Optional[str] = None
     error_path: Optional[str] = None
     output_path: Optional[str] = None
