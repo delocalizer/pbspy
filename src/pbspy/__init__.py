@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from asyncio_throttle import Throttler
 from returns.future import future_safe, FutureResult
-from returns.io import IOFailure, IOResult, IOSuccess
+from returns.io import IOFailure, IOResultE, IOSuccess
 from returns.pipeline import flow
 from returns.pointfree import bind
 from returns.result import Success
@@ -41,10 +41,10 @@ class JobSpec:
     Specifications that are not covered by explicit attributes may be
     supplied as-is via `extras` e.g. `extras='-l ngpus=1'`.
 
-    IMPORTANT: options that prevent a local error file being created
+    IMPORTANT: `qsub` options that prevent a local error file being created
     (e.g. `-R e`) must not be used. The local error file is used to detect
     when the job is completed. By default the error file will be looked for
-    in the current working directory but a custom location may be specified
+    in the current working directory; a custom location may be specified
     using `error_path`.
     """
 
@@ -67,9 +67,9 @@ class JobSpec:
                 f' -l ncpus={self.ncpus}'
                 f' -l walltime={self.walltime}'
                 f' -N {self.name}'
-                f' {("-q " + self.queue) if self.queue else ""}'
-                f' {("-e " + self.error_path) if self.error_path else ""}'
-                f' {self.extras or ""}' )
+                f'{(" -q " + self.queue) if self.queue else ""}'
+                f'{(" " + self.extras) if self.extras else ""}'
+                f'{(" -e " + self.error_path) if self.error_path else ""}')
 
 
 @dataclass
@@ -97,7 +97,7 @@ async def submit(jobspec: JobSpec) -> Job:
         stdout, stderr = await proc.communicate(
             input=jobspec.cmd.encode('utf-8'))
         if proc.returncode != 0:
-            raise Exception(f'{jobspec}: {stderr.decode("utf-8")}')
+            raise RuntimeError(f'{jobspec}: {stderr.decode("utf-8")}')
         jobid = stdout.decode('utf-8').strip()
         error_path = jobspec.error_path or DEFAULT_ERR_PATH.format(
             cwd=getcwd(),
@@ -121,11 +121,11 @@ async def wait_till_done(job: Job, waitsec: int = 10) -> Job:
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                raise Exception(f'{job}: {stderr.decode("utf-8")}')
+                raise RuntimeError(f'{job}: {stderr.decode("utf-8")}')
             details = json.loads(stdout.decode('utf-8'))['Jobs'][job.jobid]
             exit_status = details['Exit_status']
             if exit_status != 0:
-                raise Exception(f'{job}: {details["comment"]}')
+                raise RuntimeError(f'{job}: {details["comment"]}')
             return job
         await asyncio.sleep(waitsec)
 
@@ -137,7 +137,7 @@ async def run(jobs: Sequence[JobSpec]) -> None:
     handle_results(await asyncio.gather(*flows))
 
 
-def handle_results(results: Sequence[IOResult[Job, Exception]]) -> None:
+def handle_results(results: Sequence[IOResultE[Job]]) -> None:
     """Do something with accumulated results."""
     for result in results:
         match result:
