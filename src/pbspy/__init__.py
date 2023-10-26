@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from asyncio_throttle import Throttler
 from returns.future import future_safe, FutureResult
-from returns.io import IOFailure, IOResult, IOSuccess
+from returns.io import IOFailure, IOResultE, IOSuccess
 from returns.pipeline import flow
 from returns.pointfree import bind
 from returns.result import Success
@@ -97,7 +97,7 @@ async def submit(jobspec: JobSpec) -> Job:
         stdout, stderr = await proc.communicate(
             input=jobspec.cmd.encode('utf-8'))
         if proc.returncode != 0:
-            raise Exception(f'{jobspec}: {stderr.decode("utf-8")}')
+            raise RuntimeError(f'{jobspec}: {stderr.decode("utf-8")}')
         jobid = stdout.decode('utf-8').strip()
         error_path = jobspec.error_path or DEFAULT_ERR_PATH.format(
             cwd=getcwd(),
@@ -121,11 +121,11 @@ async def wait_till_done(job: Job, waitsec: int = 10) -> Job:
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                raise Exception(f'{job}: {stderr.decode("utf-8")}')
+                raise RuntimeError(f'{job}: {stderr.decode("utf-8")}')
             details = json.loads(stdout.decode('utf-8'))['Jobs'][job.jobid]
             exit_status = details['Exit_status']
             if exit_status != 0:
-                raise Exception(f'{job}: {details["comment"]}')
+                raise RuntimeError(f'{job}: {details["comment"]}')
             return job
         await asyncio.sleep(waitsec)
 
@@ -137,7 +137,7 @@ async def run(jobs: Sequence[JobSpec]) -> None:
     handle_results(await asyncio.gather(*flows))
 
 
-def handle_results(results: Sequence[IOResult[Job, Exception]]) -> None:
+def handle_results(results: Sequence[IOResultE[Job]]) -> None:
     """Do something with accumulated results."""
     for result in results:
         match result:
