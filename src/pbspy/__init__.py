@@ -84,8 +84,30 @@ class Job:
         return f'qstat -f -x -F json {self.jobid}'
 
 
+def run(jobs: Sequence[JobSpec]) -> None:
+    """Submit and monitor PBS jobs till they're all done."""
+    asyncio.run(_run(jobs))
+
+
+def handle_results(results: Sequence[IOResultE[Job]]) -> None:
+    """Do something with accumulated results."""
+    for result in results:
+        match result:
+            case IOFailure(ex):
+                print(ex, file=sys.stderr)
+            case IOSuccess(Success(job)):
+                print(f'{job.jobid} succeeded')
+
+
+async def _run(jobs: Sequence[JobSpec]) -> None:
+    """Compose the job submission, polling and result handling"""
+    handle_results(
+        await asyncio.gather(*[
+            flow(job, _submit, bind(_wait_till_done)) for job in jobs]))
+
+
 @future_safe
-async def submit(jobspec: JobSpec) -> Job:
+async def _submit(jobspec: JobSpec) -> Job:
     """Submit a job to the scheduler."""
     async with SUBMISSION_LIMIT:
         proc = await asyncio.create_subprocess_shell(
@@ -108,7 +130,7 @@ async def submit(jobspec: JobSpec) -> Job:
 
 
 @future_safe
-async def wait_till_done(job: Job, waitsec: int = 10) -> Job:
+async def _wait_till_done(job: Job, waitsec: int = 10) -> Job:
     """Wait until the job is finished."""
     while True:
         if path.exists(job.complete_on_file):
@@ -128,23 +150,6 @@ async def wait_till_done(job: Job, waitsec: int = 10) -> Job:
                 raise RuntimeError(f'{job}: {details["comment"]}')
             return job
         await asyncio.sleep(waitsec)
-
-
-async def run(jobs: Sequence[JobSpec]) -> None:
-    """Submit and monitor PBS jobs till they're all done."""
-    flows: List[FutureResult] = [
-            flow(job, submit, bind(wait_till_done)) for job in jobs]
-    handle_results(await asyncio.gather(*flows))
-
-
-def handle_results(results: Sequence[IOResultE[Job]]) -> None:
-    """Do something with accumulated results."""
-    for result in results:
-        match result:
-            case IOFailure(ex):
-                print(ex, file=sys.stderr)
-            case IOSuccess(Success(job)):
-                print(f'{job.jobid} succeeded')
 
 
 if __name__ == '__main__':
@@ -167,4 +172,4 @@ if __name__ == '__main__':
             extras='-l chip=Intel',
         ),
     ]
-    asyncio.run(run(jerbs))
+    run(jerbs)
