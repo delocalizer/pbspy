@@ -18,22 +18,22 @@ import sys
 from asyncio.subprocess import PIPE
 from dataclasses import dataclass
 from os import getcwd, environ, path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Optional, Sequence
 
 from asyncio_throttle import Throttler
-from returns.future import future_safe, FutureResult
-from returns.io import IOFailure, IOResultE, IOSuccess
+from returns.future import future_safe, FutureResultE
+from returns.io import IOFailure, IOSuccess
 from returns.pipeline import flow
 from returns.pointfree import bind
 from returns.result import Success
 
-LOGFORMAT = FORMAT = "%(asctime)s %(levelname)-6s %(name)-12s %(message)s"
-LOGLEVEL = environ.get("LOGLEVEL", "INFO").upper()
+LOGFORMAT = FORMAT = '%(asctime)s %(levelname)-6s %(name)-12s %(message)s'
+LOGLEVEL = environ.get('LOGLEVEL', 'INFO').upper()
 logging.basicConfig(level=LOGLEVEL, format=LOGFORMAT)
 LOGGER = logging.getLogger(__name__)
 
 # Some PBS installations may be configured differently
-DEFAULT_ERR_PATH: str = "{cwd}/{jobname}.e{jobnum}"
+DEFAULT_ERR_PATH: str = '{cwd}/{jobname}.e{jobnum}'
 # 10 jobs every 5 seconds
 SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
@@ -56,7 +56,7 @@ class JobSpec:
     mem: str
     ncpus: int
     walltime: str
-    name: str = "pbspy"
+    name: str = 'pbspy'
     queue: Optional[str] = None
     extras: Optional[str] = None
     error_path: Optional[str] = None
@@ -95,22 +95,10 @@ def run(jobs: Sequence[JobSpec]) -> None:
     asyncio.run(_run(jobs))
 
 
-def handle_results(results: Sequence[IOResultE[Job]]) -> None:
-    """Do something with accumulated results."""
-    for result in results:
-        match result:
-            case IOFailure(ex):
-                LOGGER.error(ex)
-            case IOSuccess(Success(job)):
-                LOGGER.info('%s succeeded', job.jobid)
-
-
 async def _run(jobs: Sequence[JobSpec]) -> None:
     """Compose the job submission, polling and result handling"""
-    handle_results(
-        await asyncio.gather(
-            *[flow(job, _submit, bind(_wait_till_done)) for job in jobs]
-        )
+    await asyncio.gather(
+        *[flow(job, _submit, bind(_wait_till_done), _handle) for job in jobs]
     )
 
 
@@ -121,8 +109,7 @@ async def _submit(jobspec: JobSpec) -> Job:
         proc = await asyncio.create_subprocess_shell(
             repr(jobspec), stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
-        stdout, stderr = await proc.communicate(
-                input=jobspec.cmd.encode('utf-8'))
+        stdout, stderr = await proc.communicate(input=jobspec.cmd.encode('utf-8'))
         if proc.returncode != 0:
             raise RuntimeError(f'{jobspec}: {render(stderr)}')
         jobid = render(stdout)
@@ -137,6 +124,7 @@ async def _submit(jobspec: JobSpec) -> Job:
 async def _wait_till_done(job: Job, waitsec: int = 10) -> Job:
     """Wait until the job is finished."""
     while True:
+        await asyncio.sleep(waitsec)
         LOGGER.debug('Checking job %s', job.jobid)
         if path.exists(job.complete_on_file):
             # filesystem checks are cheap but qstat is not, so we only qstat
@@ -152,7 +140,15 @@ async def _wait_till_done(job: Job, waitsec: int = 10) -> Job:
             if exit_status != 0:
                 raise RuntimeError(f'{job}: {details["comment"]}')
             return job
-        await asyncio.sleep(waitsec)
+
+
+async def _handle(result: FutureResultE[Job]) -> None:
+    """Do something with the pipeline result."""
+    match (await result):
+        case IOFailure(ex):
+            LOGGER.error(ex)
+        case IOSuccess(Success(job)):
+            LOGGER.info('%s succeeded', job.jobid)
 
 
 def render(byts: bytes, encoding='utf-8') -> str:
