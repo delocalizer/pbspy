@@ -67,9 +67,9 @@ class JobSpec:
                 f' -l ncpus={self.ncpus}'
                 f' -l walltime={self.walltime}'
                 f' -N {self.name}'
-                f'{(" -q " + self.queue) if self.queue else ""}'
-                f'{(" -e " + self.error_path) if self.error_path else ""}'
-                f' {self.extras}')
+                f' {("-q " + self.queue) if self.queue else ""}'
+                f' {("-e " + self.error_path) if self.error_path else ""}'
+                f' {self.extras or ""}' )
 
 
 @dataclass
@@ -95,14 +95,14 @@ async def submit(jobspec: JobSpec) -> Job:
             stderr=PIPE,
         )
         stdout, stderr = await proc.communicate(
-            input=jobspec.cmd.encode("utf-8"))
+            input=jobspec.cmd.encode('utf-8'))
         if proc.returncode != 0:
             raise Exception(f'{jobspec}: {stderr.decode("utf-8")}')
-        jobid = stdout.decode("utf-8").strip()
+        jobid = stdout.decode('utf-8').strip()
         error_path = jobspec.error_path or DEFAULT_ERR_PATH.format(
             cwd=getcwd(),
             jobname=jobspec.name,
-            jobnum=int(jobid.split(".")[0]))
+            jobnum=int(jobid.split('.')[0]))
         print(f'{jobid} submitted')
         return Job(jobid, error_path)
 
@@ -147,7 +147,7 @@ def handle_results(results: Sequence[IOResult[Job, Exception]]) -> None:
                 print(f'{job.jobid} succeeded')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # demo
     jerbs = [
         JobSpec(
@@ -164,6 +164,7 @@ if __name__ == "__main__":
             ncpus=1,
             walltime='00:01:00',
             name='haddocks-eyes',
+            extras='-l chip=Intel',
         ),
     ]
     asyncio.run(run(jerbs))
