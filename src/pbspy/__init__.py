@@ -13,10 +13,11 @@ References:
 """
 import asyncio
 import json
+import logging
 import sys
 from asyncio.subprocess import PIPE
 from dataclasses import dataclass
-from os import getcwd, path
+from os import getcwd, environ, path
 from typing import Any, Dict, List, Optional, Sequence
 
 from asyncio_throttle import Throttler
@@ -26,12 +27,15 @@ from returns.pipeline import flow
 from returns.pointfree import bind
 from returns.result import Success
 
-
-# 10 jobs every 5 seconds
-SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
+LOGFORMAT = FORMAT = '%(asctime)s %(levelname)-6s %(name)-12s %(message)s'
+LOGLEVEL = environ.get('LOGLEVEL', 'INFO').upper()
+logging.basicConfig(level=LOGLEVEL, format=LOGFORMAT)
+LOGGER = LOGGER = logging.getLogger(__name__)
 
 # Some PBS installations may be configured differently
 DEFAULT_ERR_PATH: str = '{cwd}/{jobname}.e{jobnum}'
+# 10 jobs every 5 seconds
+SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
 
 @dataclass(kw_only=True)
@@ -94,9 +98,9 @@ def handle_results(results: Sequence[IOResultE[Job]]) -> None:
     for result in results:
         match result:
             case IOFailure(ex):
-                print(ex, file=sys.stderr)
+                LOGGER.error(ex)
             case IOSuccess(Success(job)):
-                print(f'{job.jobid} succeeded')
+                LOGGER.info(f'{job.jobid} succeeded')
 
 
 async def _run(jobs: Sequence[JobSpec]) -> None:
@@ -119,13 +123,13 @@ async def _submit(jobspec: JobSpec) -> Job:
         stdout, stderr = await proc.communicate(
             input=jobspec.cmd.encode('utf-8'))
         if proc.returncode != 0:
-            raise RuntimeError(f'{jobspec}: {stderr.decode("utf-8")}')
-        jobid = stdout.decode('utf-8').strip()
+            raise RuntimeError(f'{jobspec}: {render(stderr)}')
+        jobid = render(stdout)
         error_path = jobspec.error_path or DEFAULT_ERR_PATH.format(
             cwd=getcwd(),
             jobname=jobspec.name,
             jobnum=int(jobid.split('.')[0]))
-        print(f'{jobid} submitted')
+        LOGGER.info(f'{jobid} submitted')
         return Job(jobid, error_path)
 
 
@@ -133,6 +137,7 @@ async def _submit(jobspec: JobSpec) -> Job:
 async def _wait_till_done(job: Job, waitsec: int = 10) -> Job:
     """Wait until the job is finished."""
     while True:
+        LOGGER.debug('Checking job {}', job.jobid)
         if path.exists(job.complete_on_file):
             # filesystem checks are cheap but qstat is not, so we only qstat
             # once: after we detect the file that signals completion.
@@ -143,14 +148,18 @@ async def _wait_till_done(job: Job, waitsec: int = 10) -> Job:
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                raise RuntimeError(f'{job}: {stderr.decode("utf-8")}')
-            details = json.loads(stdout.decode('utf-8'))['Jobs'][job.jobid]
+                raise RuntimeError(f'{job}: {render(stderr)}')
+            details = json.loads(render(stdout))['Jobs'][job.jobid]
             exit_status = details['Exit_status']
             if exit_status != 0:
                 raise RuntimeError(f'{job}: {details["comment"]}')
             return job
         await asyncio.sleep(waitsec)
 
+
+def render(byts: bytes, encoding='utf-8') -> str:
+    """Decode bytes and strip whitespace"""
+    return byts.decode(encoding).strip()
 
 if __name__ == '__main__':
     # demo
