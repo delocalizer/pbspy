@@ -30,7 +30,7 @@ from returns.result import Success
 LOGFORMAT = FORMAT = '%(asctime)s %(levelname)-6s %(name)-12s %(message)s'
 LOGLEVEL = environ.get('LOGLEVEL', 'INFO').upper()
 logging.basicConfig(level=LOGLEVEL, format=LOGFORMAT)
-LOGGER = LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 # Some PBS installations may be configured differently
 DEFAULT_ERR_PATH: str = '{cwd}/{jobname}.e{jobnum}'
@@ -67,10 +67,10 @@ class JobSpec:
         `cmd` is not included and is assumed to be passed via stdin.
         """
         return (f'qsub'
-                f' -l mem={self.mem}'
-                f' -l ncpus={self.ncpus}'
-                f' -l walltime={self.walltime}'
-                f' -N {self.name}'
+                f' -l mem="{self.mem}"'
+                f' -l ncpus="{self.ncpus}"'
+                f' -l walltime="{self.walltime}"'
+                f' -N "{self.name}"'
                 f'{(" -q " + self.queue) if self.queue else ""}'
                 f'{(" " + self.extras) if self.extras else ""}'
                 f'{(" -e " + self.error_path) if self.error_path else ""}')
@@ -137,7 +137,7 @@ async def _submit(jobspec: JobSpec) -> Job:
 async def _wait_till_done(job: Job, waitsec: int = 10) -> Job:
     """Wait until the job is finished."""
     while True:
-        LOGGER.debug('Checking job {}', job.jobid)
+        LOGGER.debug(f'Checking job {job.jobid}')
         if path.exists(job.complete_on_file):
             # filesystem checks are cheap but qstat is not, so we only qstat
             # once: after we detect the file that signals completion.
