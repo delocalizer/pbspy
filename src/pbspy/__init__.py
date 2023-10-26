@@ -61,7 +61,7 @@ class JobSpec:
     extras: Optional[str] = None
     error_path: Optional[str] = None
 
-    def __repr__(self) -> str:
+    def __str__(self) -> str:
         """`qsub` command required to submit the job.
 
         `cmd` is not included and is assumed to be passed via stdin.
@@ -83,7 +83,12 @@ class Job:
     """Describes a submitted PBS job."""
 
     jobid: str
+    name: str
     complete_on_file: str
+
+    def __str__(self) -> str:
+        """Human-friendly representation"""
+        return f'{self.name} [{self.jobid}]'
 
     def poll(self) -> str:
         """command required to poll the job."""
@@ -107,7 +112,7 @@ async def _submit(jobspec: JobSpec) -> Job:
     """Submit a job to the scheduler."""
     async with SUBMISSION_LIMIT:
         proc = await asyncio.create_subprocess_shell(
-            repr(jobspec), stdin=PIPE, stdout=PIPE, stderr=PIPE
+            str(jobspec), stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
         stdout, stderr = await proc.communicate(input=jobspec.cmd.encode('utf-8'))
         if proc.returncode != 0:
@@ -116,30 +121,43 @@ async def _submit(jobspec: JobSpec) -> Job:
         error_path = jobspec.error_path or DEFAULT_ERR_PATH.format(
             cwd=getcwd(), jobname=jobspec.name, jobnum=int(jobid.split('.')[0])
         )
-        LOGGER.info('%s submitted', jobid)
-        return Job(jobid, error_path)
+        job = Job(jobid, jobspec.name, error_path)
+        LOGGER.info('Submitted %s', job)
+        return job
 
 
 @future_safe
-async def _wait_till_done(job: Job, waitsec: int = 10) -> Job:
-    """Wait until the job is finished."""
-    while True:
-        await asyncio.sleep(waitsec)
-        LOGGER.debug('Checking job %s', job.jobid)
-        if path.exists(job.complete_on_file):
-            # filesystem checks are cheap but qstat is not, so we only qstat
-            # once: after we detect the file that signals completion.
-            proc = await asyncio.create_subprocess_shell(
-                job.poll(), stdout=PIPE, stderr=PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError(f'{job}: {render(stderr)}')
-            details = json.loads(render(stdout))['Jobs'][job.jobid]
-            exit_status = details['Exit_status']
-            if exit_status != 0:
-                raise RuntimeError(f'{job}: {details["comment"]}')
-            return job
+async def _wait_till_done(
+        job: Job, interval: int = 10,
+        timeout: int = 24*60*60) -> Job:
+    """Wait until the job is finished.
+
+    Args:
+        interval: `int` seconds to wait between polling
+        timeout: `int` seconds to wait before giving up
+    """
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                await asyncio.sleep(interval)
+                LOGGER.debug('Checking %s', job)
+                # filesystem checks are cheap but qstat is not, so we only run
+                # qstat once: after we detect the file that signals completion.
+                if not path.exists(job.complete_on_file):
+                    continue
+                proc = await asyncio.create_subprocess_shell(
+                    job.poll(), stdout=PIPE, stderr=PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    raise RuntimeError(f'{job}: {render(stderr)}')
+                details = json.loads(render(stdout))['Jobs'][job.jobid]
+                exit_status = details['Exit_status']
+                if exit_status != 0:
+                    raise RuntimeError(f'{job}: {details["comment"]}')
+                return job
+    except asyncio.TimeoutError:
+        raise RuntimeError(f'{job}: timed out after {timeout}s')
 
 
 async def _handle(result: FutureResultE[Job]) -> None:
@@ -172,7 +190,7 @@ if __name__ == '__main__':
             mem='1MB',
             ncpus=1,
             walltime='00:01:00',
-            name='haddocks-eyes',
+            name='the-aged-aged-man',
             extras='-l chip=Intel',
         ),
     ]
