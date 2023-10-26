@@ -13,14 +13,14 @@ References:
 """
 import asyncio
 import json
+import sys
 from asyncio.subprocess import PIPE
-from asyncio_throttle import Throttler
 from dataclasses import dataclass
 from os import getcwd, path
-from sys import stderr
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
-from returns.future import future_safe
+from asyncio_throttle import Throttler
+from returns.future import future_safe, FutureResult
 from returns.io import IOFailure, IOResult, IOSuccess
 from returns.pipeline import flow
 from returns.pointfree import bind
@@ -30,10 +30,23 @@ from returns.result import Success
 # 10 jobs every 5 seconds
 SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
+# Some PBS installations may be configured differently
+DEFAULT_ERR_PATH: str = '{cwd}/{jobname}.e{jobnum}'
 
-@dataclass
+
+@dataclass(kw_only=True)
 class JobSpec:
-    """Specifies a PBS batch job."""
+    """Specifies a PBS batch job.
+
+    Specifications that are not covered by explicit attributes may be
+    supplied as-is via `extras` e.g. `extras='-l ngpus=1'`.
+
+    IMPORTANT: options that prevent a local error file being created
+    (e.g. `-R e`) must not be used. The local error file is used to detect
+    when the job is completed. By default the error file will be looked for
+    in the current working directory but a custom location may be specified
+    using `error_path`.
+    """
 
     cmd: str
     mem: str
@@ -41,8 +54,8 @@ class JobSpec:
     walltime: str
     name: str = 'pbspy'
     queue: Optional[str] = None
+    extras: Optional[str] = None
     error_path: Optional[str] = None
-    output_path: Optional[str] = None
 
     def __repr__(self) -> str:
         """`qsub` command required to submit the job.
@@ -56,15 +69,15 @@ class JobSpec:
                 f' -N {self.name}'
                 f'{(" -q " + self.queue) if self.queue else ""}'
                 f'{(" -e " + self.error_path) if self.error_path else ""}'
-                f'{(" -o " + self.output_path) if self.output_path else ""}')
+                f' {self.extras}')
 
 
 @dataclass
 class Job:
     """Describes a submitted PBS job."""
 
-    jobid: int
-    error_path: str
+    jobid: str
+    complete_on_file: str
 
     def poll(self) -> str:
         """command required to poll the job."""
@@ -72,17 +85,8 @@ class Job:
 
 
 @future_safe
-async def submit(jobspec: Optional[JobSpec | Dict[str, Any]] = None,
-                 **kwargs) -> Job:
+async def submit(jobspec: JobSpec) -> Job:
     """Submit a job to the scheduler."""
-    match jobspec:
-        case JobSpec():
-            pass
-        case dict():
-            jobspec = JobSpec(**jobspec)
-        case _:
-            jobspec = JobSpec(**kwargs)
-
     async with SUBMISSION_LIMIT:
         proc = await asyncio.create_subprocess_shell(
             repr(jobspec),
@@ -95,24 +99,29 @@ async def submit(jobspec: Optional[JobSpec | Dict[str, Any]] = None,
         if proc.returncode != 0:
             raise Exception(f'{jobspec}: {stderr.decode("utf-8")}')
         jobid = stdout.decode("utf-8").strip()
-        jobnum = int(jobid.split(".")[0])
-        error_path = jobspec.error_path or f"{getcwd()}/{jobspec.name}.e{jobnum}"
+        error_path = jobspec.error_path or DEFAULT_ERR_PATH.format(
+            cwd=getcwd(),
+            jobname=jobspec.name,
+            jobnum=int(jobid.split(".")[0]))
         print(f'{jobid} submitted')
         return Job(jobid, error_path)
 
 
 @future_safe
-async def wait_till_done(job: Job, waitsec=10) -> Job:
+async def wait_till_done(job: Job, waitsec: int = 10) -> Job:
     """Wait until the job is finished."""
-    # filesystem checks are cheap, qstat is not
     while True:
-        if path.exists(job.error_path):
+        if path.exists(job.complete_on_file):
+            # filesystem checks are cheap but qstat is not, so we only qstat
+            # once: after we detect the file that signals completion.
             proc = await asyncio.create_subprocess_shell(
                 job.poll(),
                 stdout=PIPE,
                 stderr=PIPE
             )
             stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise Exception(f'{job}: {stderr.decode("utf-8")}')
             details = json.loads(stdout.decode('utf-8'))['Jobs'][job.jobid]
             exit_status = details['Exit_status']
             if exit_status != 0:
@@ -121,18 +130,26 @@ async def wait_till_done(job: Job, waitsec=10) -> Job:
         await asyncio.sleep(waitsec)
 
 
+async def run(jobs: Sequence[JobSpec]) -> None:
+    """Submit and monitor PBS jobs till they're all done."""
+    flows: List[FutureResult] = [
+            flow(job, submit, bind(wait_till_done)) for job in jobs]
+    handle_results(await asyncio.gather(*flows))
+
+
 def handle_results(results: Sequence[IOResult[Job, Exception]]) -> None:
     """Do something with accumulated results."""
     for result in results:
         match result:
             case IOFailure(ex):
-                print(ex, file=stderr)
+                print(ex, file=sys.stderr)
             case IOSuccess(Success(job)):
                 print(f'{job.jobid} succeeded')
 
 
-async def main():
-    jobs = [
+if __name__ == "__main__":
+    # demo
+    jerbs = [
         JobSpec(
             cmd='echo foo',
             mem='1MB',
@@ -149,10 +166,4 @@ async def main():
             name='haddocks-eyes',
         ),
     ]
-
-    flows = [flow(job, submit, bind(wait_till_done)) for job in jobs]
-    handle_results(await asyncio.gather(*flows))
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run(jerbs))
