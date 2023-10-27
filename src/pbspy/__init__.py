@@ -32,11 +32,17 @@ LOGLEVEL = environ.get('LOGLEVEL', 'INFO').upper()
 logging.basicConfig(level=LOGLEVEL, format=LOGFORMAT)
 LOGGER = logging.getLogger(__name__)
 
-# Some PBS installations may be configured differently
-DEFAULT_ERR_PATH: str = '{cwd}/{jobname}.e{jobnum}'
 # 10 jobs every 5 seconds
 SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
+
+# Two soft design goals that are somewhat in tension:
+# Goal 1:
+#   Avoid data structures with rich behavior...
+# Goal 2: 
+#   ... but keep all behavior that depends on details of how the scheduler
+#   is configured, and possibly even which scheduler is used, out of the
+#   module-level functions. 
 
 @dataclass(kw_only=True)
 class JobSpec:
@@ -56,13 +62,18 @@ class JobSpec:
     mem: str
     ncpus: int
     walltime: str
-    name: str = 'pbspy'
+    name: str
     queue: Optional[str] = None
     extras: Optional[str] = None
     error_path: Optional[str] = None
 
+    @property
+    def cmd_b(self) -> bytes:
+        """`self.cmd` encoded as bytes"""
+        return self.cmd.encode('utf-8')
+
     def __str__(self) -> str:
-        """`qsub` command required to submit the job.
+        """Representation as the `qsub` command for submitting the job.
 
         `cmd` is not included and is assumed to be passed via stdin.
         """
@@ -78,7 +89,7 @@ class JobSpec:
         )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Job:
     """Describes a submitted PBS job."""
 
@@ -86,48 +97,68 @@ class Job:
     name: str
     complete_on_file: str
 
+    @property
+    def jobnum(self) -> int:
+        """The integer part of `self.jobid`"""
+        return int(self.jobid.split('.')[0])
+
+    def __post_init__(self):
+        """Set default for `self.complete_on_file` if initialized to None."""
+        if not self.complete_on_file:
+            self.complete_on_file = path.join(
+                # some PBS installations may be configured differently
+                getcwd(), f'{self.name}.e{self.jobnum}')
+
     def __str__(self) -> str:
         """Human-friendly representation"""
         return f'{self.name} [{self.jobid}]'
 
-    def poll(self) -> str:
-        """command required to poll the job."""
+    def status_cmd(self) -> str:
+        """Command to check status of finished job."""
         return f'qstat -f -x -F json {self.jobid}'
 
+    def status_check(self, output: bytes):
+        """Parse the output of `status_cmd` and confirm job exit status is 0.
 
-def run(jobs: Sequence[JobSpec]) -> None:
+        Raises:
+            RuntimeError if exit status is not 0
+        """
+        details = json.loads(decode_(output))['Jobs'][self.jobid]
+        if details['Exit_status'] != 0:
+            raise RuntimeError(f'{self}: {details["comment"]}')
+
+
+def run(jobs: Sequence[JobSpec]):
     """Submit and monitor PBS jobs till they're all done."""
     asyncio.run(_run(jobs))
 
 
-async def _run(jobs: Sequence[JobSpec]) -> None:
+async def _run(jobs: Sequence[JobSpec]):
     """Compose the job submission, polling and result handling"""
     await asyncio.gather(
-        *[flow(job, _submit, bind(_wait_till_done), _handle) for job in jobs]
+        *[flow(job, submit, bind(wait_till_done), handle) for job in jobs]
     )
 
 
 @future_safe
-async def _submit(jobspec: JobSpec) -> Job:
+async def submit(jobspec: JobSpec) -> Job:
     """Submit a job to the scheduler."""
     async with SUBMISSION_LIMIT:
         proc = await asyncio.create_subprocess_shell(
             str(jobspec), stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
-        stdout, stderr = await proc.communicate(input=jobspec.cmd.encode('utf-8'))
+        stdout, stderr = await proc.communicate(input=jobspec.cmd_b)
         if proc.returncode != 0:
-            raise RuntimeError(f'{jobspec}: {render(stderr)}')
-        jobid = render(stdout)
-        error_path = jobspec.error_path or DEFAULT_ERR_PATH.format(
-            cwd=getcwd(), jobname=jobspec.name, jobnum=int(jobid.split('.')[0])
-        )
-        job = Job(jobid, jobspec.name, error_path)
+            raise RuntimeError(f'{jobspec}: {decode_(stderr)}')
+        job = Job(jobid=decode_(stdout),
+                  name=jobspec.name,
+                  complete_on_file=jobspec.error_path)
         LOGGER.info('Submitted %s', job)
         return job
 
 
 @future_safe
-async def _wait_till_done(
+async def wait_till_done(
         job: Job, interval: int = 10,
         timeout: int = 24*60*60) -> Job:
     """Wait until the job is finished.
@@ -146,21 +177,18 @@ async def _wait_till_done(
                 if not path.exists(job.complete_on_file):
                     continue
                 proc = await asyncio.create_subprocess_shell(
-                    job.poll(), stdout=PIPE, stderr=PIPE
+                    job.status_cmd(), stdout=PIPE, stderr=PIPE
                 )
                 stdout, stderr = await proc.communicate()
                 if proc.returncode != 0:
-                    raise RuntimeError(f'{job}: {render(stderr)}')
-                details = json.loads(render(stdout))['Jobs'][job.jobid]
-                exit_status = details['Exit_status']
-                if exit_status != 0:
-                    raise RuntimeError(f'{job}: {details["comment"]}')
+                    raise RuntimeError(f'{job}: {decode_(stderr)}')
+                job.status_check(stdout)
                 return job
     except asyncio.TimeoutError:
         raise RuntimeError(f'{job}: timed out after {timeout}s')
 
 
-async def _handle(result: FutureResultE[Job]) -> None:
+async def handle(result: FutureResultE[Job]):
     """Do something with the pipeline result."""
     match (await result):
         case IOFailure(ex):
@@ -169,7 +197,7 @@ async def _handle(result: FutureResultE[Job]) -> None:
             LOGGER.info('%s succeeded', job.jobid)
 
 
-def render(byts: bytes, encoding='utf-8') -> str:
+def decode_(byts: bytes, encoding='utf-8') -> str:
     """Decode bytes and strip whitespace"""
     return byts.decode(encoding).strip()
 
