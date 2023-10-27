@@ -18,7 +18,7 @@ import sys
 from asyncio.subprocess import PIPE
 from dataclasses import dataclass
 from os import getcwd, environ, path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 from asyncio_throttle import Throttler
 from returns.future import future_safe, FutureResultE
@@ -32,6 +32,8 @@ LOGLEVEL = environ.get('LOGLEVEL', 'INFO').upper()
 logging.basicConfig(level=LOGLEVEL, format=LOGFORMAT)
 LOGGER = logging.getLogger(__name__)
 
+# 72 hr timeout
+DEFAULT_TIMEOUT: int = 3*24*60*60
 # 10 jobs every 5 seconds
 SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
@@ -117,15 +119,15 @@ class Job:
         """Command to check status of finished job."""
         return f'qstat -f -x -F json {self.jobid}'
 
-    def status_check(self, output: bytes):
-        """Parse the output of `status_cmd` and confirm job exit status is 0.
+    def status_check(self, output: bytes) -> Tuple[bool, str]:
+        """Parse the output of `status_cmd`.
 
-        Raises:
-            RuntimeError if exit status is not 0
+        Returns:
+            A tuple (success, msg) where success is True iff job exit status
+            was 0, and msg is any helpful info to use e.g. when success==False.
         """
         details = json.loads(decode_(output))['Jobs'][self.jobid]
-        if details['Exit_status'] != 0:
-            raise RuntimeError(f'{self}: {details["comment"]}')
+        return (details['Exit_status'] == 0, details['comment'])
 
 
 def run(jobs: Sequence[JobSpec]):
@@ -160,7 +162,7 @@ async def submit(jobspec: JobSpec) -> Job:
 @future_safe
 async def wait_till_done(
         job: Job, interval: int = 10,
-        timeout: int = 24*60*60) -> Job:
+        timeout: int = DEFAULT_TIMEOUT) -> Job:
     """Wait until the job is finished.
 
     Args:
@@ -182,7 +184,9 @@ async def wait_till_done(
                 stdout, stderr = await proc.communicate()
                 if proc.returncode != 0:
                     raise RuntimeError(f'{job}: {decode_(stderr)}')
-                job.status_check(stdout)
+                success, msg = job.status_check(stdout)
+                if not success:
+                    raise RuntimeError(f'{job}: {msg}')
                 return job
     except asyncio.TimeoutError:
         raise RuntimeError(f'{job}: timed out after {timeout}s')
