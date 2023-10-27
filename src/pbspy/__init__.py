@@ -33,18 +33,23 @@ logging.basicConfig(level=LOGLEVEL, format=LOGFORMAT)
 LOGGER = logging.getLogger(__name__)
 
 # 72 hr timeout
-DEFAULT_TIMEOUT: int = 3*24*60*60
+DEFAULT_TIMEOUT: int = 3 * 24 * 60 * 60
 # 10 jobs every 5 seconds
 SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 
+# (soft) design goals
+#
+# 1: We're explictly targeting PBSPro but want to avoid choices that make it
+#    hard to switch to some other batch system. The minimal assumptions we
+#    make are that:
+#    a) the job id is returned on stdout when a job is submitted
+#    b) some kind of sentinel file is created at the end of the job
+#    c) job exit status can be queried after the job is done
+# 2: Avoid data structures with rich behavior, BUT...
+# 3: ... as far as possible keep all behavior that depends on details of which
+#    batch system is used out of the module-level functions. So that'll end up
+#    in the dataclasses.
 
-# Two soft design goals that are somewhat in tension:
-# Goal 1:
-#   Avoid data structures with rich behavior...
-# Goal 2: 
-#   ... but keep all behavior that depends on details of how the scheduler
-#   is configured, and possibly even which scheduler is used, out of the
-#   module-level functions. 
 
 @dataclass(kw_only=True)
 class JobSpec:
@@ -68,11 +73,6 @@ class JobSpec:
     queue: Optional[str] = None
     extras: Optional[str] = None
     error_path: Optional[str] = None
-
-    @property
-    def cmd_b(self) -> bytes:
-        """`self.cmd` encoded as bytes"""
-        return self.cmd.encode('utf-8')
 
     def __str__(self) -> str:
         """Representation as the `qsub` command for submitting the job.
@@ -99,17 +99,14 @@ class Job:
     name: str
     complete_on_file: str
 
-    @property
-    def jobnum(self) -> int:
-        """The integer part of `self.jobid`"""
-        return int(self.jobid.split('.')[0])
+    @classmethod
+    def default_error_path(cls, jobid, jobname):
+        """Default path to the error file for a submitted job.
 
-    def __post_init__(self):
-        """Set default for `self.complete_on_file` if initialized to None."""
-        if not self.complete_on_file:
-            self.complete_on_file = path.join(
-                # some PBS installations may be configured differently
-                getcwd(), f'{self.name}.e{self.jobnum}')
+        The format will depend on how the batch system is configured but
+        usually includes the jobid and job name.
+        """
+        return path.join(getcwd(), f'{jobname}.e{jobid.split(".")[0]}')
 
     def __str__(self) -> str:
         """Human-friendly representation"""
@@ -126,7 +123,7 @@ class Job:
             A tuple (success, msg) where success is True iff job exit status
             was 0, and msg is any helpful info to use e.g. when success==False.
         """
-        details = json.loads(decode_(output))['Jobs'][self.jobid]
+        details = json.loads(_decode(output))['Jobs'][self.jobid]
         return (details['Exit_status'] == 0, details['comment'])
 
 
@@ -149,20 +146,24 @@ async def submit(jobspec: JobSpec) -> Job:
         proc = await asyncio.create_subprocess_shell(
             str(jobspec), stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
-        stdout, stderr = await proc.communicate(input=jobspec.cmd_b)
+        stdout, stderr = await proc.communicate(input=_encode(jobspec.cmd))
         if proc.returncode != 0:
-            raise RuntimeError(f'{jobspec}: {decode_(stderr)}')
-        job = Job(jobid=decode_(stdout),
-                  name=jobspec.name,
-                  complete_on_file=jobspec.error_path)
+            raise RuntimeError(f'{jobspec}: {_decode(stderr)}')
+        jobid = _decode(stdout)
+        job = Job(
+            jobid=jobid,
+            name=jobspec.name,
+            complete_on_file=jobspec.error_path
+            or Job.default_error_path(jobid, jobspec.name),
+        )
         LOGGER.info('Submitted %s', job)
         return job
 
 
 @future_safe
 async def wait_till_done(
-        job: Job, interval: int = 10,
-        timeout: int = DEFAULT_TIMEOUT) -> Job:
+    job: Job, interval: int = 10, timeout: int = DEFAULT_TIMEOUT
+) -> Job:
     """Wait until the job is finished.
 
     Args:
@@ -183,7 +184,7 @@ async def wait_till_done(
                 )
                 stdout, stderr = await proc.communicate()
                 if proc.returncode != 0:
-                    raise RuntimeError(f'{job}: {decode_(stderr)}')
+                    raise RuntimeError(f'{job}: {_decode(stderr)}')
                 success, msg = job.status_check(stdout)
                 if not success:
                     raise RuntimeError(f'{job}: {msg}')
@@ -201,9 +202,14 @@ async def handle(result: FutureResultE[Job]):
             LOGGER.info('%s succeeded', job.jobid)
 
 
-def decode_(byts: bytes, encoding='utf-8') -> str:
+def _decode(byts: bytes, encoding='utf-8') -> str:
     """Decode bytes and strip whitespace"""
     return byts.decode(encoding).strip()
+
+
+def _encode(text: str, encoding='utf-8') -> bytes:
+    """Encode text"""
+    return text.encode(encoding)
 
 
 if __name__ == '__main__':
