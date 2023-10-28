@@ -1,0 +1,14 @@
+log:
+  format: '%(asctime)s %(levelname)-6s %(name)-12s %(message)s'
+  level: '${LOGLEVEL:INFO}'
+
+submission: 
+  # 10 jobs every 5 seconds
+  rate_limit: 10
+  period: 5
+
+polling:
+  # 10 second poll interval
+  interval: 10
+  # 72 hr timeout
+  timeout: 259200

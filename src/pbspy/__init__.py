@@ -1,16 +1,5 @@
-"""
-Lightweight PBS job submission and monitoring.
+"""Lightweight PBS job submission and monitoring."""
 
-By using an `asyncio` event loop we can submit and monitor hundreds of jobs
-(or more) without blocking on IO or using multiple threads. By using `returns`
-we can use FP style composition and not worry about checking for failures at
-every point.
-
-References:
-
-* https://docs.python.org/3/library/asyncio-task.html
-* https://github.com/dry-python/returns#better-async-composition
-"""
 import asyncio
 import json
 import logging
@@ -21,23 +10,28 @@ from os import getcwd, environ, path
 from typing import Optional, Sequence, Tuple
 
 from asyncio_throttle import Throttler
+from dependency_injector import containers, providers
+from dependency_injector.wiring import Provide, inject
 from returns.future import future_safe, FutureResultE
 from returns.io import IOFailure, IOSuccess
 from returns.pipeline import flow
 from returns.pointfree import bind
 from returns.result import Success
 
-LOGFORMAT = FORMAT = '%(asctime)s %(levelname)-6s %(name)-12s %(message)s'
-LOGLEVEL = environ.get('LOGLEVEL', 'INFO').upper()
-logging.basicConfig(level=LOGLEVEL, format=LOGFORMAT)
-LOGGER = logging.getLogger(__name__)
-
-# 72 hr timeout
-DEFAULT_TIMEOUT: int = 3 * 24 * 60 * 60
-# 10 jobs every 5 seconds
-SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
-
-# (soft) design goals
+# Technology choices:
+#
+# By using an `asyncio` event loop we can submit and monitor hundreds of jobs
+# (or more) without blocking on IO or using multiple threads. By using
+# `returns` we can use FP style composition and not worry about checking for
+# failures at every point; for DI however we eschew `returns.context` in
+# favour of `dependency_injector` for more readable code.
+#
+# References:
+#
+# * https://docs.python.org/3/library/asyncio-task.html
+# * https://github.com/dry-python/returns#better-async-composition
+#
+# (soft) design goals:
 #
 # 1: We're explictly targeting PBSPro but want to avoid choices that make it
 #    hard to switch to some other batch system. The minimal assumptions we
@@ -49,6 +43,26 @@ SUBMISSION_LIMIT: Throttler = Throttler(rate_limit=10, period=5)
 # 3: ... as far as possible keep all behavior that depends on details of which
 #    batch system is used out of the module-level functions. So that'll end up
 #    in the dataclasses.
+
+
+class Container(containers.DeclarativeContainer):
+    """Dependency injection."""
+
+    config = providers.Configuration(
+        yaml_files=[path.join(path.dirname(__file__), 'config.yml')]
+    )
+    logging = providers.Resource(
+        logging.basicConfig,
+        stream=sys.stdout,
+        level=config.log.level,
+        format=config.log.format,
+    )
+
+    job_throttle = providers.Singleton(
+        Throttler,
+        rate_limit=config.submission.rate_limit,
+        period=config.submission.period,
+    )
 
 
 @dataclass(kw_only=True)
@@ -140,9 +154,12 @@ async def _run(jobs: Sequence[JobSpec]):
 
 
 @future_safe
-async def submit(jobspec: JobSpec) -> Job:
+@inject
+async def submit(
+    jobspec: JobSpec, throttle: Throttler = Provide[Container.job_throttle]
+) -> Job:
     """Submit a job to the scheduler."""
-    async with SUBMISSION_LIMIT:
+    async with throttle:
         proc = await asyncio.create_subprocess_shell(
             str(jobspec), stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
@@ -156,13 +173,16 @@ async def submit(jobspec: JobSpec) -> Job:
             complete_on_file=jobspec.error_path
             or Job.default_error_path(jobid, jobspec.name),
         )
-        LOGGER.info('Submitted %s', job)
+        logging.info('Submitted %s', job)
         return job
 
 
 @future_safe
+@inject
 async def wait_till_done(
-    job: Job, interval: int = 10, timeout: int = DEFAULT_TIMEOUT
+    job: Job,
+    interval: int = Provide[Container.config.polling.interval],
+    timeout: int = Provide[Container.config.polling.timeout],
 ) -> Job:
     """Wait until the job is finished.
 
@@ -174,7 +194,7 @@ async def wait_till_done(
         async with asyncio.timeout(timeout):
             while True:
                 await asyncio.sleep(interval)
-                LOGGER.debug('Checking %s', job)
+                logging.debug('Checking %s', job)
                 # filesystem checks are cheap but qstat is not, so we only run
                 # qstat once: after we detect the file that signals completion.
                 if not path.exists(job.complete_on_file):
@@ -197,9 +217,9 @@ async def handle(result: FutureResultE[Job]):
     """Do something with the pipeline result."""
     match (await result):
         case IOFailure(ex):
-            LOGGER.error(ex)
+            logging.error(ex)
         case IOSuccess(Success(job)):
-            LOGGER.info('%s succeeded', job.jobid)
+            logging.info('%s succeeded', job.jobid)
 
 
 def _decode(byts: bytes, encoding='utf-8') -> str:
@@ -213,6 +233,7 @@ def _encode(text: str, encoding='utf-8') -> bytes:
 
 
 if __name__ == '__main__':
+
     # demo
     jerbs = [
         JobSpec(
@@ -222,6 +243,7 @@ if __name__ == '__main__':
             walltime='00:01:00',
             name='a-sitting-on-a-gate',
             queue='testing',
+            error_path='done',
         ),
         JobSpec(
             cmd='echo bar',
@@ -230,6 +252,10 @@ if __name__ == '__main__':
             walltime='00:01:00',
             name='the-aged-aged-man',
             extras='-l chip=Intel',
+            error_path='done',
         ),
     ]
+    container = Container()
+    container.init_resources()
+    container.wire(modules=[__name__])
     run(jerbs)
