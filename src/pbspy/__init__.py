@@ -243,7 +243,6 @@ if __name__ == '__main__':
             walltime='00:01:00',
             name='a-sitting-on-a-gate',
             queue='testing',
-            error_path='done',
         ),
         JobSpec(
             cmd='echo bar',
@@ -252,7 +251,6 @@ if __name__ == '__main__':
             walltime='00:01:00',
             name='the-aged-aged-man',
             extras='-l chip=Intel',
-            error_path='done',
         ),
     ]
     container = Container()
