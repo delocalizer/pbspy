@@ -44,11 +44,22 @@ def main():
         help='JSON serialized JobSpec',
     )
     parser.add_argument(
+        '--poll-interval', type=int, help='seconds to wait between job polling events'
+    )
+    parser.add_argument(
+        '--poll-timeout',
+        type=int,
+        help='hours to wait for job to finish before giving up',
+    )
+    parser.add_argument(
         '--version', action='version', version=importlib.metadata.version('pbspy')
     )
     args = parser.parse_args()
-    # could set any custom config from CLI args, e.g. timeout
-    container.config.polling.timeout.from_value(24 * 60 * 60)
+    # set any custom config from CLI args, e.g. timeout
+    if args.poll_interval:
+        container.config.polling.interval.from_value(args.poll_interval)
+    if args.poll_timeout:
+        container.config.polling.timeout.from_value(3600 * args.poll_timeout)
     run(args.jobspec)
 
 
