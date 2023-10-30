@@ -51,7 +51,6 @@ LOGGER = logging.getLogger(__name__)
 class Container(containers.DeclarativeContainer):
     """Dependency injection."""
 
-    print(path.join(path.dirname(__file__), 'config.yml'))
     config = providers.Configuration(
         yaml_files=[path.join(path.dirname(__file__), 'config.yml')]
     )
