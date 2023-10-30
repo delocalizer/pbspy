@@ -1,3 +1,6 @@
 asyncio_throttle>=1.0.2
 dependency_injector>=4.41
+pydantic>=2.4.2
+PyYAML>=6.0.1
 returns>=0.22.0
+

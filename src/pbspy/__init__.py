@@ -18,6 +18,9 @@ from returns.pipeline import flow
 from returns.pointfree import bind
 from returns.result import Success
 
+
+LOGGER = logging.getLogger(__name__)
+
 # Technology choices:
 #
 # By using an `asyncio` event loop we can submit and monitor hundreds of jobs
@@ -48,6 +51,7 @@ from returns.result import Success
 class Container(containers.DeclarativeContainer):
     """Dependency injection."""
 
+    print(path.join(path.dirname(__file__), 'config.yml'))
     config = providers.Configuration(
         yaml_files=[path.join(path.dirname(__file__), 'config.yml')]
     )
@@ -57,7 +61,6 @@ class Container(containers.DeclarativeContainer):
         level=config.log.level,
         format=config.log.format,
     )
-
     job_throttle = providers.Singleton(
         Throttler,
         rate_limit=config.submission.rate_limit,
@@ -69,8 +72,8 @@ class Container(containers.DeclarativeContainer):
 class JobSpec:
     """Specifies a PBS batch job.
 
-    Specifications not managed by explicit attributes may be supplied as-is
-    via `extras` e.g. `extras='-l ngpus=1'`.
+    Options not managed by explicit attributes may be supplied as-is via
+    `extras` e.g. `extras='-l ngpus=1'`.
 
     IMPORTANT: `qsub` options that prevent a local error file being created
     (e.g. `-R e`) must not be used. The local error file is used to detect
@@ -173,7 +176,7 @@ async def submit(
             complete_on_file=jobspec.error_path
             or Job.default_error_path(jobid, jobspec.name),
         )
-        logging.info('Submitted %s', job)
+        LOGGER.info('Submitted %s', job)
         return job
 
 
@@ -194,7 +197,7 @@ async def wait_till_done(
         async with asyncio.timeout(timeout):
             while True:
                 await asyncio.sleep(interval)
-                logging.debug('Checking %s', job)
+                LOGGER.debug('Checking %s', job)
                 # filesystem checks are cheap but qstat is not, so we only run
                 # qstat once: after we detect the file that signals completion.
                 if not path.exists(job.complete_on_file):
@@ -215,11 +218,13 @@ async def wait_till_done(
 
 async def handle(result: FutureResultE[Job]):
     """Do something with the pipeline result."""
+    # Here we just log the result. In practice you'd probably want to e.g.
+    # create a file, update a db record etc.
     match (await result):
         case IOFailure(ex):
-            logging.error(ex)
+            LOGGER.error(ex)
         case IOSuccess(Success(job)):
-            logging.info('%s succeeded', job.jobid)
+            LOGGER.info('%s succeeded', job.jobid)
 
 
 def _decode(byts: bytes, encoding='utf-8') -> str:
@@ -230,30 +235,3 @@ def _decode(byts: bytes, encoding='utf-8') -> str:
 def _encode(text: str, encoding='utf-8') -> bytes:
     """Encode text"""
     return text.encode(encoding)
-
-
-if __name__ == '__main__':
-
-    # demo
-    jerbs = [
-        JobSpec(
-            cmd='echo foo',
-            mem='1MB',
-            ncpus=1,
-            walltime='00:01:00',
-            name='a-sitting-on-a-gate',
-            queue='testing',
-        ),
-        JobSpec(
-            cmd='echo bar',
-            mem='1MB',
-            ncpus=1,
-            walltime='00:01:00',
-            name='the-aged-aged-man',
-            extras='-l chip=Intel',
-        ),
-    ]
-    container = Container()
-    container.init_resources()
-    container.wire(modules=[__name__])
-    run(jerbs)
