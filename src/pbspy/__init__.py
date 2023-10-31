@@ -49,7 +49,10 @@ LOGGER = logging.getLogger(__name__)
 
 
 class Container(containers.DeclarativeContainer):
-    """Dependency injection."""
+    """Dependency injection.
+
+    Loads default config from adjacent 'config.yml' file.
+    """
 
     config = providers.Configuration(
         yaml_files=[path.join(path.dirname(__file__), 'config.yml')]
