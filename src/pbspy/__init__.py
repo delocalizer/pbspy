@@ -87,8 +87,8 @@ class JobSpec:
     walltime: str
     name: str
     queue: Optional[str] = None
-    extras: Optional[str] = None
     error_path: Optional[str] = None
+    extras: Optional[str] = None
 
     def __str__(self) -> str:
         """Representation as the `qsub` command for submitting the job.
@@ -96,14 +96,14 @@ class JobSpec:
         `cmd` is not included and is assumed to be passed via stdin.
         """
         return (
-            f'qsub'
-            f' -l mem="{self.mem}"'
-            f' -l ncpus="{self.ncpus}"'
-            f' -l walltime="{self.walltime}"'
-            f' -N "{self.name}"'
-            f'{(" -q " + self.queue) if self.queue else ""}'
-            f'{(" " + self.extras) if self.extras else ""}'
-            f'{(" -e " + self.error_path) if self.error_path else ""}'
+            f'qsub' +
+            f' -l mem="{self.mem}"' +
+            f' -l ncpus="{self.ncpus}"' +
+            f' -l walltime="{self.walltime}"' +
+            f' -N "{self.name}"' +
+            (f' -q "{self.queue}"' if self.queue else '') +
+            (f' -e "{self.error_path}"' if self.error_path else '') +
+            (f' {self.extras}' if self.extras else '')
         )
 
 

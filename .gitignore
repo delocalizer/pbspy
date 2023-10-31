@@ -1,2 +1,7 @@
 build/
 src/pbspy.egg-info/
+__pycache__
+*.pyc
+*.swp
+.coverage
+doc/
