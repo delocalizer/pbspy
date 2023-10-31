@@ -166,7 +166,7 @@ async def submit(
             str(jobspec), stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
         stdout, stderr = await proc.communicate(input=_encode(jobspec.cmd))
-        if proc.returncode != 0:
+        if proc.returncode:
             raise RuntimeError(f'{jobspec}: {_decode(stderr)}')
         jobid = _decode(stdout)
         job = Job(
@@ -205,7 +205,7 @@ async def wait_till_done(
                     job.status_cmd(), stdout=PIPE, stderr=PIPE
                 )
                 stdout, stderr = await proc.communicate()
-                if proc.returncode != 0:
+                if proc.returncode:
                     raise RuntimeError(f'{job}: {_decode(stderr)}')
                 success, msg = job.status_check(stdout)
                 if not success:

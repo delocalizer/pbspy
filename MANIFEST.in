@@ -1,3 +1,4 @@
 include LICENSE
 include VERSION
 include src/pbspy/config.yml
+include src/pbspy/py.typed
