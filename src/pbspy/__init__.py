@@ -6,7 +6,7 @@ import logging
 import sys
 from asyncio.subprocess import PIPE
 from dataclasses import dataclass
-from os import getcwd, environ, path
+from os import getcwd, path
 from typing import Optional, Sequence, Tuple
 
 from asyncio_throttle import Throttler
@@ -96,14 +96,14 @@ class JobSpec:
         `cmd` is not included and is assumed to be passed via stdin.
         """
         return (
-            f'qsub' +
-            f' -l mem="{self.mem}"' +
-            f' -l ncpus="{self.ncpus}"' +
-            f' -l walltime="{self.walltime}"' +
-            f' -N "{self.name}"' +
-            (f' -q "{self.queue}"' if self.queue else '') +
-            (f' -e "{self.error_path}"' if self.error_path else '') +
-            (f' {self.extras}' if self.extras else '')
+            'qsub'
+            + f' -l mem="{self.mem}"'
+            + f' -l ncpus="{self.ncpus}"'
+            + f' -l walltime="{self.walltime}"'
+            + f' -N "{self.name}"'
+            + (f' -q "{self.queue}"' if self.queue else '')
+            + (f' -e "{self.error_path}"' if self.error_path else '')
+            + (f' {self.extras}' if self.extras else '')
         )
 
 
@@ -211,15 +211,15 @@ async def wait_till_done(
                 if not success:
                     raise RuntimeError(f'{job}: {msg}')
                 return job
-    except asyncio.TimeoutError:
-        raise RuntimeError(f'{job}: timed out after {timeout}s')
+    except asyncio.TimeoutError as tee:
+        raise RuntimeError(f'{job}: timed out after {timeout}s') from tee
 
 
 async def handle(result: FutureResultE[Job]):
     """Do something with the pipeline result."""
     # Here we just log the result. In practice you'd probably want to e.g.
     # create a file, update a db record etc.
-    match (await result):
+    match await result:
         case IOFailure(ex):
             LOGGER.error(ex)
         case IOSuccess(Success(job)):

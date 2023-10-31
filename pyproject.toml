@@ -4,3 +4,13 @@ requires = [
     "setuptools>=42",
     "wheel"
 ]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.coverage.run]
+# (this config could also go in setup.cfg or tox.ini as [coverage:run])
+# so that the tox-installed package is measured, not the src/ dir:
+source = [
+    "pbspy"
+]
